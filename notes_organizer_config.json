@@ -1,0 +1,5 @@
+{
+    "notes_path": "C:\\Projekte\\Training2",
+    "model": "claude-3-sonnet-20240229",
+    "api_base": "https://api.anthropic.com/v1"
+}
