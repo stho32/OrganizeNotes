@@ -18,7 +18,7 @@ logging.basicConfig(
 )
 
 class NotesOrganizer:
-    def __init__(self, config_path: str = "notes_organizer_config.json"):
+    def __init__(self, config_path: str = "notes_organizer_config.json", sort_mode: str = "sorted"):
         logging.info("Initializing NotesOrganizer")
         self.config = self._load_config(config_path)
         self.api_key = os.environ.get('ANTHROPIC_API_KEY')
@@ -28,9 +28,14 @@ class NotesOrganizer:
         self.client = Anthropic(api_key=self.api_key)
         self.memory_file = "gedaechtnis.json"
         self.memory = self._load_memory()
+        self.sort_mode = sort_mode.lower()
+        if self.sort_mode not in ["sorted", "random"]:
+            logging.warning(f"Invalid sort_mode '{sort_mode}', defaulting to 'sorted'")
+            self.sort_mode = "sorted"
         logging.info(f"Loaded configuration from {config_path}")
         logging.debug(f"Notes path: {self.config['notes_path']}")
         logging.debug(f"Memory file: {self.memory_file}")
+        logging.debug(f"Sort mode: {self.sort_mode}")
         
     def _load_config(self, config_path: str) -> dict:
         """Load configuration from JSON file."""
@@ -55,9 +60,29 @@ class NotesOrganizer:
                     return memory
             except Exception as e:
                 logging.error(f"Error loading memory file: {e}")
-                raise
-        logging.info("No existing memory file found, creating new one")
-        return {"files": {}, "themes": []}
+                logging.info("Deleting corrupted memory file and creating new one")
+                try:
+                    os.remove(self.memory_file)
+                except Exception as del_err:
+                    logging.error(f"Error deleting corrupted memory file: {del_err}")
+        
+        logging.info("Creating new memory file with existing folder names")
+        # Get existing folder names from the target directory
+        themes = []
+        try:
+            for item in os.listdir(self.config["notes_path"]):
+                full_path = os.path.join(self.config["notes_path"], item)
+                if os.path.isdir(full_path) and not item.startswith('.'):
+                    themes.append(item)
+            logging.info(f"Found {len(themes)} existing themes in target directory")
+        except Exception as e:
+            logging.error(f"Error reading target directory: {e}")
+            themes = []
+            
+        memory = {"files": {}, "themes": themes}
+        self.memory = memory  # Assign to self.memory before saving
+        self._save_memory()  # Save the initialized memory
+        return memory
     
     def _save_memory(self):
         """Save current memory state to file."""
@@ -117,7 +142,7 @@ class NotesOrganizer:
         
         system_prompt = "You are a helpful assistant that categorizes files into themes. Return only the theme name, no additional text. If the theme matches an existing one, use that exact name. If it's a new theme, make it concise (1-3 words) and descriptive."
         
-        user_prompt = f"""Analyze this file and determine its main theme.
+        user_prompt = f"""Analyze this file and determine its main theme. If it contains 'MOC' in the filename or the content, return 'MOCs' as the theme.
 Filename: {filename}
 Existing themes: {existing_themes}
 
@@ -209,88 +234,97 @@ Content: {content if content else 'Non-markdown file, using filename only'}"""
             
         logging.info(f"Processing file: {file_path}")
         filename = os.path.basename(file_path)
-        current_crc = self.calculate_crc(file_path)
         
-        # Check if file needs processing
-        if (filename in self.memory["files"] and 
-            self.memory["files"][filename]["crc"] == current_crc):
-            logging.info(f"File {filename} already processed and unchanged, skipping")
-            return
-        
-        logging.info(f"File {filename} needs processing (new or modified)")
-        # Get content and theme
-        content = self.get_file_content(file_path)
-        theme = self.get_theme_from_llm(filename, content)
-        sanitized_theme = self.sanitize_theme_name(theme)
-        
-        # Create theme directory if it doesn't exist
-        theme_dir = os.path.join(self.config["notes_path"], sanitized_theme)
-        logging.debug(f"Theme directory: {theme_dir}")
-        os.makedirs(theme_dir, exist_ok=True)
-        
-        # Move file to theme directory
-        new_path = os.path.join(theme_dir, filename)
-        logging.info(f"Moving {filename} to {new_path}")
-        
-        # Ask for user confirmation
-        print(f"\nVorgeschlagene Aktion:")
-        print(f"Verschiebe '{filename}'")
-        print(f"von:  {file_path}")
-        print(f"nach: {new_path}")
-        print(f"Thema: {theme}")
-        print("\nOptionen:")
-        print("n - Abbrechen")
-        print("d - löschen")
-        print("Enter - Vorschlag so übernehmen")
-        print("Alternativer Name - Geben Sie einen anderen Ordnernamen ein")
-        confirmation = input("\nIhre Wahl: ")
-
-        if confirmation.lower() == 'n':
-            logging.info(f"User skipped moving {filename}")
-            return
-        elif confirmation.lower() == 'd':
-            try:
-                os.remove(file_path)
-                logging.info(f"Deleted file: {filename}")
+        while True:  # Loop to allow retries
+            current_crc = self.calculate_crc(file_path)
+            
+            # Check if file needs processing
+            if (filename in self.memory["files"] and 
+                self.memory["files"][filename]["crc"] == current_crc):
+                logging.info(f"File {filename} already processed and unchanged, skipping")
                 return
-            except Exception as e:
-                logging.error(f"Error deleting file {filename}: {e}")
-                raise
-        elif confirmation.strip() != "":
-            # Benutzer hat einen alternativen Ordnernamen eingegeben
-            sanitized_theme = self.sanitize_theme_name(confirmation)
+            
+            logging.info(f"File {filename} needs processing (new or modified)")
+            # Get content and theme
+            content = self.get_file_content(file_path)
+            theme = self.get_theme_from_llm(filename, content)
+            sanitized_theme = self.sanitize_theme_name(theme)
+            
+            # Create theme directory if it doesn't exist
             theme_dir = os.path.join(self.config["notes_path"], sanitized_theme)
-            new_path = os.path.join(theme_dir, filename)
+            logging.debug(f"Theme directory: {theme_dir}")
             os.makedirs(theme_dir, exist_ok=True)
-            theme = confirmation  # Aktualisiere das Theme für die Speicherung im Memory
-            logging.info(f"Using user-provided theme: {theme}")
-        
-        try:
-            shutil.move(file_path, new_path)
-            logging.debug(f"File moved successfully")
-        except Exception as e:
-            logging.error(f"Error moving file: {e}")
-            raise
-        
-        # Update memory
-        if theme not in self.memory["themes"]:
-            logging.info(f"Adding new theme: {theme}")
-            self.memory["themes"].append(theme)
-        
-        self.memory["files"][filename] = {
-            "crc": current_crc,
-            "theme": theme
-        }
-        
-        self._save_memory()
-        logging.info(f"Successfully processed {filename} -> {theme}")
+            
+            # Move file to theme directory
+            new_path = os.path.join(theme_dir, filename)
+            logging.info(f"Moving {filename} to {new_path}")
+            
+            # Ask for user confirmation
+            print(f"\nVorgeschlagene Aktion:")
+            print(f"Verschiebe '{filename}'")
+            print(f"von:  {file_path}")
+            print(f"nach: {new_path}")
+            print(f"Thema: {theme}")
+            print("\nOptionen:")
+            print("n - Abbrechen")
+            print("d - löschen")
+            print("r - noch einmal versuchen")
+            print("Enter - Vorschlag so übernehmen")
+            print("Alternativer Name - Geben Sie einen anderen Ordnernamen ein")
+            confirmation = input("\nIhre Wahl: ")
+
+            if confirmation.lower() == 'n':
+                logging.info(f"User skipped moving {filename}")
+                return
+            elif confirmation.lower() == 'd':
+                try:
+                    os.remove(file_path)
+                    logging.info(f"Deleted file: {filename}")
+                    return
+                except Exception as e:
+                    logging.error(f"Error deleting file {filename}: {e}")
+                    raise
+            elif confirmation.lower() == 'r':
+                logging.info(f"User requested retry for {filename}")
+                continue  # Start the process again
+            elif confirmation.strip() != "":
+                # Benutzer hat einen alternativen Ordnernamen eingegeben
+                sanitized_theme = self.sanitize_theme_name(confirmation)
+                theme_dir = os.path.join(self.config["notes_path"], sanitized_theme)
+                new_path = os.path.join(theme_dir, filename)
+                os.makedirs(theme_dir, exist_ok=True)
+                theme = confirmation  # Aktualisiere das Theme für die Speicherung im Memory
+                logging.info(f"Using user-provided theme: {theme}")
+            
+            try:
+                shutil.move(file_path, new_path)
+                logging.debug(f"File moved successfully")
+            except Exception as e:
+                logging.error(f"Error moving file: {e}")
+                raise
+            
+            # Update memory
+            if theme not in self.memory["themes"]:
+                logging.info(f"Adding new theme: {theme}")
+                self.memory["themes"].append(theme)
+            
+            self.memory["files"][filename] = {
+                "crc": current_crc,
+                "theme": theme
+            }
+            
+            self._save_memory()
+            logging.info(f"Successfully processed {filename} -> {theme}")
+            return  # Exit the loop after successful processing
     
     def organize_notes(self):
         """Main function to organize all notes."""
         logging.info("Starting notes organization")
-        logging.info(f"Processing directory: {self.config['notes_path']}")
+        logging.info(f"Processing directory: {self.config['notes_path']} in {self.sort_mode} order")
         
         try:
+            # Collect all files first
+            files_to_process = []
             for root, _, files in os.walk(self.config["notes_path"]):
                 # Skip directories we shouldn't process
                 if not self.should_process_path(root):
@@ -301,7 +335,21 @@ Content: {content if content else 'Non-markdown file, using filename only'}"""
                 for file in files:
                     if file != self.memory_file:
                         file_path = os.path.normpath(os.path.join(root, file))
-                        self.process_file(file_path)
+                        files_to_process.append((file_path, len(os.path.dirname(file_path).split(os.sep))))
+
+            # Sort files based on sort_mode
+            if self.sort_mode == "sorted":
+                # Sort by depth (files without folders first), then alphabetically
+                files_to_process.sort(key=lambda x: (x[1], x[0]))
+                logging.info("Processing files in sorted order")
+            else:  # random mode
+                import random
+                random.shuffle(files_to_process)
+                logging.info("Processing files in random order")
+
+            # Process files in the determined order
+            for file_path, _ in files_to_process:
+                self.process_file(file_path)
             
             # After processing all files, remove empty directories
             self.remove_empty_directories()
@@ -314,7 +362,14 @@ Content: {content if content else 'Non-markdown file, using filename only'}"""
 if __name__ == "__main__":
     try:
         logging.info("Starting NotesOrganizer")
-        organizer = NotesOrganizer()
+        # Ask for sort mode
+        print("\nHow would you like to process the files?")
+        print("1. Sorted (alphabetically, files without folders first)")
+        print("2. Random order")
+        choice = input("\nEnter your choice (1/2): ").strip()
+        
+        sort_mode = "sorted" if choice == "1" else "random"
+        organizer = NotesOrganizer(sort_mode=sort_mode)
         organizer.organize_notes()
         logging.info("NotesOrganizer completed successfully")
     except Exception as e:
