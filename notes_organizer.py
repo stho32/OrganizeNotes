@@ -9,11 +9,10 @@ from anthropic import Anthropic
 
 # Configure logging
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('notes_organizer.log'),
-        logging.StreamHandler()
+        logging.FileHandler('notes_organizer.log')
     ]
 )
 
@@ -33,17 +32,15 @@ class NotesOrganizer:
             logging.warning(f"Invalid sort_mode '{sort_mode}', defaulting to 'sorted'")
             self.sort_mode = "sorted"
         logging.info(f"Loaded configuration from {config_path}")
-        logging.debug(f"Notes path: {self.config['notes_path']}")
-        logging.debug(f"Memory file: {self.memory_file}")
-        logging.debug(f"Sort mode: {self.sort_mode}")
+        logging.info(f"Notes path: {self.config['notes_path']}")
+        logging.info(f"Memory file: {self.memory_file}")
+        logging.info(f"Sort mode: {self.sort_mode}")
         
     def _load_config(self, config_path: str) -> dict:
         """Load configuration from JSON file."""
-        logging.debug(f"Loading config from {config_path}")
         try:
             with open(config_path, 'r', encoding='utf-8') as f:
                 config = json.load(f)
-                logging.debug(f"Loaded config: {config}")
                 return config
         except Exception as e:
             logging.error(f"Error loading config: {e}")
@@ -51,12 +48,12 @@ class NotesOrganizer:
     
     def _load_memory(self) -> dict:
         """Load or initialize memory file."""
-        logging.debug(f"Loading memory from {self.memory_file}")
+        logging.info(f"Loading memory from {self.memory_file}")
         if os.path.exists(self.memory_file):
             try:
                 with open(self.memory_file, 'r', encoding='utf-8') as f:
                     memory = json.load(f)
-                    logging.debug(f"Loaded existing memory with {len(memory['files'])} files and {len(memory['themes'])} themes")
+                    logging.info(f"Loaded existing memory with {len(memory['files'])} files and {len(memory['themes'])} themes")
                     return memory
             except Exception as e:
                 logging.error(f"Error loading memory file: {e}")
@@ -86,7 +83,7 @@ class NotesOrganizer:
     
     def _save_memory(self):
         """Save current memory state to file."""
-        logging.debug("Saving memory to file")
+        logging.info("Saving memory to file")
         try:
             with open(self.memory_file, 'w', encoding='utf-8') as f:
                 json.dump(self.memory, f, indent=4)
@@ -97,12 +94,11 @@ class NotesOrganizer:
     
     def calculate_crc(self, file_path: str) -> str:
         """Calculate CRC32 hash of a file."""
-        logging.debug(f"Calculating CRC for {file_path}")
+        logging.info(f"Calculating CRC for {file_path}")
         try:
             with open(file_path, 'rb') as f:
                 content = f.read()
                 crc = format(zlib.crc32(content) & 0xFFFFFFFF, '08x')
-                logging.debug(f"CRC calculated: {crc}")
                 return crc
         except Exception as e:
             logging.error(f"Error calculating CRC for {file_path}: {e}")
@@ -111,7 +107,7 @@ class NotesOrganizer:
     def get_file_content(self, file_path: str) -> Optional[str]:
         """Get file content if it's a markdown file."""
         if file_path.lower().endswith('.md'):
-            logging.debug(f"Reading markdown file: {file_path}")
+            logging.info(f"Reading markdown file: {file_path}")
             try:
                 with open(file_path, 'r', encoding='utf-8') as f:
                     content = f.read()
@@ -125,31 +121,32 @@ class NotesOrganizer:
                         except Exception as e:
                             logging.error(f"Error deleting empty file {file_path}: {e}")
                             raise
-                    logging.debug(f"Read {len(content)} characters from file")
                     return content
             except Exception as e:
                 logging.error(f"Error reading file {file_path}: {e}")
                 raise
-        logging.debug(f"Skipping non-markdown file: {file_path}")
+        logging.info(f"Skipping non-markdown file: {file_path}")
         return None
     
-    def get_theme_from_llm(self, filename: str, content: Optional[str]) -> str:
-        """Query LLM to determine the main theme of the file."""
-        logging.info(f"Getting theme for {filename}")
+    def get_theme_from_llm(self, filename: str, content: Optional[str]) -> List[str]:
+        """Query LLM to determine three possible themes for the file."""
+        logging.info(f"Getting themes for {filename}")
         
         existing_themes = ", ".join(self.memory["themes"]) if self.memory["themes"] else "No existing themes yet"
-        logging.debug(f"Existing themes: {existing_themes}")
+        logging.info(f"Existing themes: {existing_themes}")
         
-        system_prompt = "You are a helpful assistant that categorizes files into themes. Return only the theme name, no additional text. If the theme matches an existing one, use that exact name. If it's a new theme, make it concise (1-3 words) and descriptive."
+        system_prompt = "You are a helpful assistant that categorizes files into themes. Return exactly three theme suggestions, one per line, no additional text. If any themes match existing ones, use those exact names. For new themes, make them concise (1-3 words) and descriptive."
         
-        user_prompt = f"""Analyze this file and determine its main theme. If it contains 'MOC' in the filename or the content, return 'MOCs' as the theme.
+        user_prompt = f"""Analyze this file and suggest three possible themes. If it contains 'MOC' in the filename or the content, make 'MOCs' the first theme.
 Filename: {filename}
 Existing themes: {existing_themes}
 
-Content: {content if content else 'Non-markdown file, using filename only'}"""
+Content: {content if content else 'Non-markdown file, using filename only'}
+
+Return exactly three themes, one per line."""
 
         try:
-            logging.debug(f"Sending request to Anthropic API for {filename}")
+            logging.info(f"Sending request to Anthropic API for {filename}")
             message = self.client.messages.create(
                 model=self.config["model"],
                 system=system_prompt,
@@ -158,20 +155,45 @@ Content: {content if content else 'Non-markdown file, using filename only'}"""
                     {"role": "user", "content": user_prompt}
                 ]
             )
-            theme = message.content[0].text.strip()
-            logging.info(f"Received theme '{theme}' for {filename}")
-            return theme
+            
+            # Get all non-empty lines from the response
+            themes = [t.strip() for t in message.content[0].text.strip().split('\n') if t.strip()]
+            
+            # Validate themes
+            valid_themes = []
+            for theme in themes[:3]:  # Take at most 3 themes
+                # Basic validation: ensure theme is a reasonable length and contains valid characters
+                if 1 <= len(theme) <= 50 and any(c.isalnum() for c in theme):
+                    valid_themes.append(theme)
+            
+            # If we got no valid themes from AI, use fallback
+            if not valid_themes:
+                logging.warning("No valid themes received from AI, using fallback themes")
+                valid_themes = ["Unsorted", "General", "Misc"]
+            
+            # If we got fewer than 3 themes, add some sensible defaults
+            while len(valid_themes) < 3:
+                fallback_options = ["Unsorted", "General", "Misc", "Documents", "Notes"]
+                for fallback in fallback_options:
+                    if fallback not in valid_themes:
+                        valid_themes.append(fallback)
+                        break
+                if len(valid_themes) < 3:  # If we still don't have enough, add numbered misc
+                    valid_themes.append(f"Misc_{len(valid_themes) + 1}")
+            
+            logging.info(f"Final themes after validation: {valid_themes[:3]}")
+            return valid_themes[:3]
+            
         except Exception as e:
-            logging.error(f"Error getting theme from LLM: {e}")
-            logging.warning(f"Using 'Unsorted' as fallback theme for {filename}")
-            return "Unsorted"
-    
+            logging.error(f"Error getting themes from LLM: {e}")
+            logging.warning(f"Using fallback themes for {filename}")
+            return ["Unsorted", "General", "Misc"]
+
     def sanitize_theme_name(self, theme: str) -> str:
         """Convert theme name to directory-friendly format."""
-        logging.debug(f"Sanitizing theme name: {theme}")
+        logging.info(f"Sanitizing theme name: {theme}")
         sanitized = "".join(c if c.isalnum() or c in "_ -" else "_" for c in theme)
         result = sanitized.strip("_")
-        logging.debug(f"Sanitized theme name: {result}")
         return result
     
     def should_process_path(self, path: str) -> bool:
@@ -203,10 +225,10 @@ Content: {content if content else 'Non-markdown file, using filename only'}"""
         for root, dirs, files in os.walk(self.config["notes_path"], topdown=False):
             # Skip directories we shouldn't process
             if not self.should_process_path(root):
-                logging.debug(f"Skipping excluded directory: {root}")
+                logging.info(f"Skipping excluded directory: {root}")
                 continue
 
-            logging.debug(f"Scanning directory: {root}")
+            logging.info(f"Scanning directory: {root}")
             for file in files:
                 if file != self.memory_file:
                     file_path = os.path.normpath(os.path.join(root, file))
@@ -224,12 +246,12 @@ Content: {content if content else 'Non-markdown file, using filename only'}"""
         """Process a single file."""
         # Skip files we shouldn't process
         if not self.should_process_path(file_path):
-            logging.debug(f"Skipping excluded path: {file_path}")
+            logging.info(f"Skipping excluded path: {file_path}")
             return
 
         # Skip processing if file doesn't exist (might have been deleted as empty)
         if not os.path.exists(file_path):
-            logging.debug(f"File no longer exists, skipping: {file_path}")
+            logging.info(f"File no longer exists, skipping: {file_path}")
             return
             
         logging.info(f"Processing file: {file_path}")
@@ -245,33 +267,46 @@ Content: {content if content else 'Non-markdown file, using filename only'}"""
                 return
             
             logging.info(f"File {filename} needs processing (new or modified)")
-            # Get content and theme
+            # Get content and themes
             content = self.get_file_content(file_path)
-            theme = self.get_theme_from_llm(filename, content)
-            sanitized_theme = self.sanitize_theme_name(theme)
             
-            # Create theme directory if it doesn't exist
-            theme_dir = os.path.join(self.config["notes_path"], sanitized_theme)
-            logging.debug(f"Theme directory: {theme_dir}")
-            os.makedirs(theme_dir, exist_ok=True)
+            # Display file content
+            print("\n" + "="*80)
+            print(f"Dateiinhalt von '{filename}':")
+            print("="*80)
+            if content:
+                # If it's a markdown file, show the content
+                print(content)
+            else:
+                # If it's not a markdown file or content is None
+                print("(Keine Vorschau verfügbar - keine Markdown-Datei)")
+            print("="*80 + "\n")
             
-            # Move file to theme directory
-            new_path = os.path.join(theme_dir, filename)
-            logging.info(f"Moving {filename} to {new_path}")
+            try:
+                themes = self.get_theme_from_llm(filename, content)
+                if not themes or len(themes) != 3:
+                    logging.error("Unexpected number of themes received")
+                    themes = ["Unsorted", "General", "Misc"]
+            except Exception as e:
+                logging.error(f"Error during theme generation: {e}")
+                themes = ["Unsorted", "General", "Misc"]
             
-            # Ask for user confirmation
-            print(f"\nVorgeschlagene Aktion:")
-            print(f"Verschiebe '{filename}'")
-            print(f"von:  {file_path}")
-            print(f"nach: {new_path}")
-            print(f"Thema: {theme}")
+            # Print suggestions and get user choice
+            print(f"\nVorgeschlagene Aktionen für '{filename}':")
+            print(f"Aktueller Pfad: {file_path}")
+            print("\nVorgeschlagene Themen:")
+            for i, theme in enumerate(themes, 1):
+                sanitized_theme = self.sanitize_theme_name(theme)
+                new_path = os.path.join(self.config["notes_path"], sanitized_theme, filename)
+                print(f"{i} - {theme}      -> {new_path}")
+            
             print("\nOptionen:")
-            print("n - Abbrechen")
-            print("d - löschen")
-            print("r - noch einmal versuchen")
-            print("Enter - Vorschlag so übernehmen")
+            print("1-3 - Thema auswählen")
+            print("n   - Abbrechen")
+            print("d   - löschen")
+            print("r   - noch einmal versuchen")
             print("Alternativer Name - Geben Sie einen anderen Ordnernamen ein")
-            confirmation = input("\nIhre Wahl: ")
+            confirmation = input("\nIhre Wahl: ").strip()
 
             if confirmation.lower() == 'n':
                 logging.info(f"User skipped moving {filename}")
@@ -287,34 +322,38 @@ Content: {content if content else 'Non-markdown file, using filename only'}"""
             elif confirmation.lower() == 'r':
                 logging.info(f"User requested retry for {filename}")
                 continue  # Start the process again
-            elif confirmation.strip() != "":
-                # Benutzer hat einen alternativen Ordnernamen eingegeben
-                sanitized_theme = self.sanitize_theme_name(confirmation)
-                theme_dir = os.path.join(self.config["notes_path"], sanitized_theme)
-                new_path = os.path.join(theme_dir, filename)
-                os.makedirs(theme_dir, exist_ok=True)
-                theme = confirmation  # Aktualisiere das Theme für die Speicherung im Memory
-                logging.info(f"Using user-provided theme: {theme}")
+            
+            # Handle theme selection (1-3) or custom theme
+            selected_theme = None
+            if confirmation in ['1', '2', '3']:
+                selected_theme = themes[int(confirmation) - 1]
+            else:
+                selected_theme = confirmation
+            
+            sanitized_theme = self.sanitize_theme_name(selected_theme)
+            theme_dir = os.path.join(self.config["notes_path"], sanitized_theme)
+            new_path = os.path.join(theme_dir, filename)
+            os.makedirs(theme_dir, exist_ok=True)
             
             try:
                 shutil.move(file_path, new_path)
-                logging.debug(f"File moved successfully")
+                logging.info(f"File moved successfully")
             except Exception as e:
                 logging.error(f"Error moving file: {e}")
                 raise
             
             # Update memory
-            if theme not in self.memory["themes"]:
-                logging.info(f"Adding new theme: {theme}")
-                self.memory["themes"].append(theme)
+            if selected_theme not in self.memory["themes"]:
+                logging.info(f"Adding new theme: {selected_theme}")
+                self.memory["themes"].append(selected_theme)
             
             self.memory["files"][filename] = {
                 "crc": current_crc,
-                "theme": theme
+                "theme": selected_theme
             }
             
             self._save_memory()
-            logging.info(f"Successfully processed {filename} -> {theme}")
+            logging.info(f"Successfully processed {filename} -> {selected_theme}")
             return  # Exit the loop after successful processing
     
     def organize_notes(self):
@@ -325,17 +364,21 @@ Content: {content if content else 'Non-markdown file, using filename only'}"""
         try:
             # Collect all files first
             files_to_process = []
+            print("\nScanning for files...")
             for root, _, files in os.walk(self.config["notes_path"]):
                 # Skip directories we shouldn't process
                 if not self.should_process_path(root):
-                    logging.debug(f"Skipping excluded directory: {root}")
+                    logging.info(f"Skipping excluded directory: {root}")
                     continue
 
-                logging.debug(f"Scanning directory: {root}")
+                logging.info(f"Scanning directory: {root}")
                 for file in files:
                     if file != self.memory_file:
                         file_path = os.path.normpath(os.path.join(root, file))
                         files_to_process.append((file_path, len(os.path.dirname(file_path).split(os.sep))))
+
+            total_files = len(files_to_process)
+            print(f"\nGefunden: {total_files} Dateien zum Verarbeiten")
 
             # Sort files based on sort_mode
             if self.sort_mode == "sorted":
@@ -348,12 +391,16 @@ Content: {content if content else 'Non-markdown file, using filename only'}"""
                 logging.info("Processing files in random order")
 
             # Process files in the determined order
-            for file_path, _ in files_to_process:
+            for index, (file_path, _) in enumerate(files_to_process, 1):
+                print(f"\nVerarbeite Datei {index} von {total_files} ({(index/total_files)*100:.1f}%)")
+                print(f"Aktuelle Datei: {os.path.basename(file_path)}")
                 self.process_file(file_path)
             
             # After processing all files, remove empty directories
+            print("\nEntferne leere Verzeichnisse...")
             self.remove_empty_directories()
             
+            print("\nVerarbeitung abgeschlossen!")
             logging.info("Notes organization completed successfully")
         except Exception as e:
             logging.error(f"Error during notes organization: {e}")
