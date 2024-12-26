@@ -132,18 +132,22 @@ class NotesOrganizer:
         """Query LLM to determine three possible themes for the file."""
         logging.info(f"Getting themes for {filename}")
         
-        existing_themes = ", ".join(self.memory["themes"]) if self.memory["themes"] else "No existing themes yet"
+        existing_themes = ", ".join(self.memory["themes"]) if self.memory["themes"] else "Noch keine Themen vorhanden"
         logging.info(f"Existing themes: {existing_themes}")
         
-        system_prompt = "You are a helpful assistant that categorizes files into themes. Return exactly three theme suggestions, one per line, no additional text. If any themes match existing ones, use those exact names. For new themes, make them concise (1-3 words) and descriptive."
-        
-        user_prompt = f"""Analyze this file and suggest three possible themes. If it contains 'MOC' in the filename or the content, make 'MOCs' the first theme.
-Filename: {filename}
-Existing themes: {existing_themes}
+        system_prompt = """Du bist ein hilfreicher Assistent, der Dateien in Themen kategorisiert. 
+Gib genau drei Themenvorschläge zurück, einen pro Zeile, ohne zusätzlichen Text. 
+Wenn ein vorgeschlagenes Thema zu einem bereits existierenden passt, verwende exakt den gleichen Namen. 
+Für neue Themen, erstelle kurze (1-3 Wörter) und beschreibende deutsche Bezeichnungen.
+Bevorzuge die Verwendung bestehender Themen, bevor du neue Themen erstellst."""
 
-Content: {content if content else 'Non-markdown file, using filename only'}
+        user_prompt = f"""Analysiere diese Datei und schlage drei mögliche Themen vor. Falls 'MOC' im Dateinamen oder Inhalt vorkommt, mache 'MOCs' zum ersten Thema.
+Dateiname: {filename}
+Existierende Themen: {existing_themes}
 
-Return exactly three themes, one per line."""
+Inhalt: {content if content else 'Keine Markdown-Datei, nur Dateiname wird verwendet'}
+
+Gib genau drei Themen zurück, eines pro Zeile. Neue Themen bitte auf Deutsch."""
 
         try:
             logging.info(f"Sending request to Anthropic API for {filename}")
@@ -169,17 +173,17 @@ Return exactly three themes, one per line."""
             # If we got no valid themes from AI, use fallback
             if not valid_themes:
                 logging.warning("No valid themes received from AI, using fallback themes")
-                valid_themes = ["Unsorted", "General", "Misc"]
+                valid_themes = ["Unsortiert", "Allgemein", "Sonstiges"]
             
             # If we got fewer than 3 themes, add some sensible defaults
             while len(valid_themes) < 3:
-                fallback_options = ["Unsorted", "General", "Misc", "Documents", "Notes"]
+                fallback_options = ["Unsortiert", "Allgemein", "Sonstiges", "Dokumente", "Notizen"]
                 for fallback in fallback_options:
                     if fallback not in valid_themes:
                         valid_themes.append(fallback)
                         break
                 if len(valid_themes) < 3:  # If we still don't have enough, add numbered misc
-                    valid_themes.append(f"Misc_{len(valid_themes) + 1}")
+                    valid_themes.append(f"Sonstiges_{len(valid_themes) + 1}")
             
             logging.info(f"Final themes after validation: {valid_themes[:3]}")
             return valid_themes[:3]
@@ -187,7 +191,7 @@ Return exactly three themes, one per line."""
         except Exception as e:
             logging.error(f"Error getting themes from LLM: {e}")
             logging.warning(f"Using fallback themes for {filename}")
-            return ["Unsorted", "General", "Misc"]
+            return ["Unsortiert", "Allgemein", "Sonstiges"]
 
     def sanitize_theme_name(self, theme: str) -> str:
         """Convert theme name to directory-friendly format."""
@@ -286,10 +290,10 @@ Return exactly three themes, one per line."""
                 themes = self.get_theme_from_llm(filename, content)
                 if not themes or len(themes) != 3:
                     logging.error("Unexpected number of themes received")
-                    themes = ["Unsorted", "General", "Misc"]
+                    themes = ["Unsortiert", "Allgemein", "Sonstiges"]
             except Exception as e:
                 logging.error(f"Error during theme generation: {e}")
-                themes = ["Unsorted", "General", "Misc"]
+                themes = ["Unsortiert", "Allgemein", "Sonstiges"]
             
             # Print suggestions and get user choice
             print(f"\nVorgeschlagene Aktionen für '{filename}':")
@@ -365,25 +369,23 @@ Return exactly three themes, one per line."""
             # Collect all files first
             files_to_process = []
             print("\nScanning for files...")
-            for root, _, files in os.walk(self.config["notes_path"]):
-                # Skip directories we shouldn't process
-                if not self.should_process_path(root):
-                    logging.info(f"Skipping excluded directory: {root}")
-                    continue
-
-                logging.info(f"Scanning directory: {root}")
-                for file in files:
-                    if file != self.memory_file:
-                        file_path = os.path.normpath(os.path.join(root, file))
-                        files_to_process.append((file_path, len(os.path.dirname(file_path).split(os.sep))))
+            
+            # Only process files directly in the root directory
+            root_dir = self.config["notes_path"]
+            for file in os.listdir(root_dir):
+                file_path = os.path.join(root_dir, file)
+                # Skip if it's a directory or the memory file
+                if os.path.isfile(file_path) and file != self.memory_file:
+                    if self.should_process_path(file_path):
+                        files_to_process.append((file_path, 0))  # 0 for root level
 
             total_files = len(files_to_process)
-            print(f"\nGefunden: {total_files} Dateien zum Verarbeiten")
+            print(f"\nGefunden: {total_files} Dateien zum Verarbeiten (nur aus dem Hauptverzeichnis)")
 
             # Sort files based on sort_mode
             if self.sort_mode == "sorted":
-                # Sort by depth (files without folders first), then alphabetically
-                files_to_process.sort(key=lambda x: (x[1], x[0]))
+                # Sort alphabetically (no need for depth sorting as all files are in root)
+                files_to_process.sort(key=lambda x: x[0])
                 logging.info("Processing files in sorted order")
             else:  # random mode
                 import random
